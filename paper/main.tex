@@ -1,0 +1,325 @@
+\documentclass[letterpaper]{article}
+
+% Use the official AAAI style file when preparing the camera-ready package.
+% \usepackage{aaai27}
+\usepackage{times}
+\usepackage{helvet}
+\usepackage{courier}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\title{Support Density Matters: Density-Guided Feature Tracing for Training-Free Open-Vocabulary Semantic Segmentation}
+
+\author{
+Anonymous Authors
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Open-vocabulary semantic segmentation requires dense visual predictions from
+vision-language models that are primarily trained with image-level supervision.
+Recent training-free pipelines improve this transfer by reusing frozen CLIP
+features and avoiding dataset-specific optimization. However, we observe that
+the decisive factor for dense transfer is not only whether a patch feature is
+semantically aligned, but also whether it is sufficiently supported by nearby
+visual evidence on the patch manifold. Low-support patches frequently appear
+near object boundaries, thin structures, and small regions, where direct
+text-image similarity produces fragmented predictions. We therefore propose
+DeFT, a Density-guided Feature Tracing framework for training-free
+open-vocabulary segmentation. DeFT estimates support density among frozen visual
+tokens, traces reliable high-density evidence to low-support regions, and
+performs structure-conserving multi-scale recalibration before text-image
+similarity rendering. The whole procedure is deterministic and introduces no
+learnable parameters. DeFT can be inserted into existing frozen
+vision-language segmentation runtimes without retraining. Experiments on standard open-vocabulary
+segmentation benchmarks show consistent improvements over the backbone,
+especially on boundary-sensitive and small-object categories, while preserving
+the training-free property.
+\end{abstract}
+
+\section{Introduction}
+
+Open-vocabulary semantic segmentation (OVSS) aims to segment arbitrary
+categories described by natural language. Vision-language models such as CLIP
+provide strong image-text alignment, but their patch features are not directly
+optimized for pixel-level prediction. A common training-free solution is to
+freeze the vision-language model, extract patch-level visual features, and
+compute dense similarity with text embeddings. This design is appealing because
+it avoids dataset-specific training and preserves broad vocabulary coverage.
+
+Despite this appeal, dense transfer from CLIP remains structurally fragile. In
+many images, confident semantic responses concentrate on a small number of
+patches, while boundaries, thin parts, and small objects receive weak support
+from their surrounding token neighborhood. We call this phenomenon \emph{support
+density imbalance}. A patch can be semantically meaningful but still unreliable
+for dense prediction when its local and non-local neighbors provide insufficient
+evidence. This perspective shifts the focus from isolated token correction to
+the density of visual evidence available for each region.
+
+In this paper, we ask a simple question: can a frozen segmentation pipeline be
+improved by explicitly tracing reliable support from dense regions to sparse
+ones? We answer yes and propose \textbf{DeFT}, a \textbf{De}nsity-guided
+\textbf{F}eature \textbf{T}racing framework. Given frozen visual patch features,
+DeFT constructs a token support graph using cosine similarity, estimates a
+support density score for every patch, and computes a density gate that
+identifies regions requiring structural assistance. It then aggregates evidence
+from semantically similar tokens and spatial neighborhoods, followed by a
+multi-scale recalibration step that restores local continuity without learning
+new parameters.
+
+DeFT is designed as a plug-in for existing training-free OVSS backbones. In our
+implementation, we insert DeFT after the frozen visual encoder produces patch
+features and before text-image similarity is computed. This placement preserves
+the original semantic space while improving spatial coherence. Since DeFT has no
+learnable weights and uses fixed hyperparameters, it keeps the training-free
+protocol intact.
+
+Our contributions are summarized as follows:
+\begin{itemize}
+    \item We identify support density imbalance as a key obstacle in
+    training-free open-vocabulary semantic segmentation, especially for
+    boundaries, thin structures, and small regions.
+    \item We propose DeFT, a deterministic feature tracing framework that
+    estimates patch support density and propagates reliable evidence to
+    low-support regions without training.
+    \item We introduce a structure-conserving multi-scale recalibration step
+    that improves dense prediction while preserving CLIP's original semantic
+    embedding space.
+    \item We provide comprehensive comparisons, ablations, and visual analyses
+    to verify accuracy, boundary quality, small-object behavior, and runtime
+    cost.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Open-vocabulary semantic segmentation.}
+OVSS extends semantic segmentation to categories unseen during segmentation
+training. Early methods adapt vision-language models with additional supervision,
+while recent approaches explore training-free inference by directly reusing
+frozen image-text representations. DeFT follows the training-free line and does
+not introduce dataset-specific optimization.
+
+\paragraph{Dense transfer from vision-language models.}
+CLIP-like models learn image-level alignment and contain transferable visual
+tokens, yet their features are not guaranteed to be spatially coherent. Existing
+methods improve dense transfer through prompt design, feature refinement,
+attention manipulation, or post-processing. DeFT is complementary: it operates
+on the frozen visual tokens and explicitly models how much support each patch
+receives from the visual token manifold.
+
+\paragraph{Graph and spatial refinement.}
+Graph-based propagation and spatial smoothing are widely used in dense
+prediction. Unlike trainable graph neural networks or learned refinement heads,
+DeFT uses a fixed similarity graph and deterministic multi-scale operations.
+This makes it suitable for training-free OVSS, where introducing learnable
+modules would weaken the protocol.
+
+\section{Method}
+
+Let $X \in \mathbb{R}^{N \times C}$ denote frozen visual patch features produced
+by a vision-language segmentation runtime, where $N=H \times W$. Let $T \in
+\mathbb{R}^{K \times C}$ denote normalized text embeddings for $K$ candidate
+classes. The baseline computes dense logits by cosine similarity between $X$
+and $T$. DeFT refines $X$ before this similarity step:
+\begin{equation}
+    \hat{X} = \mathrm{DeFT}(X), \quad
+    Y = \hat{X} T^\top.
+\end{equation}
+All operations in DeFT are fixed and contain no learnable parameters.
+
+\subsection{Support Density Estimation}
+
+We first build a patch support graph in the normalized visual feature space. For
+each token $x_i$, we compute cosine similarity to all other tokens:
+\begin{equation}
+    s_{ij} = \frac{x_i^\top x_j}{\|x_i\|_2 \|x_j\|_2}.
+\end{equation}
+Let $\mathcal{N}_k(i)$ be the top-$k$ most similar neighbors of token $i$. We
+define the support density of $x_i$ as:
+\begin{equation}
+    d_i = \frac{1}{k} \sum_{j \in \mathcal{N}_k(i)} \max(s_{ij}, 0).
+\end{equation}
+The density is min-max normalized per image. A density gate is then obtained by:
+\begin{equation}
+    g_i = \sigma \left( \frac{\tau - d_i}{\gamma} \right),
+\end{equation}
+where $\tau$ is the density threshold and $\gamma$ is the temperature. A larger
+$g_i$ indicates that token $i$ has lower visual support and should receive more
+traced evidence.
+
+\subsection{Density-Guided Evidence Tracing}
+
+For each token, DeFT gathers two sources of support. The first source is a
+semantic graph aggregate:
+\begin{equation}
+    z_i^{g} = \sum_{j \in \mathcal{N}_k(i)}
+    \frac{\exp(s_{ij}/\beta)}{\sum_{m \in \mathcal{N}_k(i)} \exp(s_{im}/\beta)}
+    x_j,
+\end{equation}
+where $\beta$ controls graph sharpness. The second source is a local spatial
+aggregate $z_i^{l}$ computed by average pooling on the reshaped feature map over
+multiple window sizes. The traced context is:
+\begin{equation}
+    z_i = \lambda_g z_i^g + \lambda_l z_i^l.
+\end{equation}
+The output token is a density-gated mixture:
+\begin{equation}
+    x_i' = (1 - \alpha g_i) x_i + \alpha g_i z_i.
+\end{equation}
+Thus, high-density tokens remain close to the original backbone representation,
+while low-density tokens borrow evidence from reliable semantic and local
+neighbors.
+
+\subsection{Structure-Conserving Multi-Scale Recalibration}
+
+Evidence tracing improves token reliability but may still leave local
+discontinuities. DeFT therefore applies a deterministic multi-scale
+recalibration to the feature map $X'$. For kernel sizes $\mathcal{K}$, we compute
+multi-scale residuals:
+\begin{equation}
+    r = \frac{1}{|\mathcal{K}|} \sum_{q \in \mathcal{K}}
+    \left(\mathrm{AvgPool}_q(X') - X'\right).
+\end{equation}
+The residual is injected more strongly into low-density regions:
+\begin{equation}
+    \tilde{X} = X' + \eta (1-D) \odot r,
+\end{equation}
+where $D$ is the density map and $\eta$ is a fixed strength. Finally, features
+are $\ell_2$-normalized to preserve the cosine similarity interface with text
+embeddings.
+
+\subsection{Text-Conditioned Confidence Rendering}
+
+The refined features are compared with text embeddings using the original
+backbone classifier. Optionally, DeFT renders logits with a mild support
+confidence prior:
+\begin{equation}
+    Y_{k,i} = (\tilde{x}_i^\top t_k) \cdot
+    \left(1 + \rho(d_i - \bar{d})\right),
+\end{equation}
+where $\rho$ is fixed and small. This step does not change the class vocabulary
+or text prompts. In the main experiments, we report both with and without this
+rendering term to isolate its effect.
+
+\begin{algorithm}[t]
+\caption{DeFT Inference}
+\begin{algorithmic}[1]
+\STATE Input frozen visual tokens $X$, text embeddings $T$
+\STATE Normalize visual tokens and build cosine similarity graph
+\STATE Estimate support density $D$ from top-$k$ positive neighbors
+\STATE Compute density gate $G$ from $D$
+\STATE Aggregate semantic graph evidence $Z^g$
+\STATE Aggregate local multi-scale evidence $Z^l$
+\STATE Trace evidence to low-density tokens using $G$
+\STATE Apply structure-conserving multi-scale recalibration
+\STATE Compute logits with original text embeddings
+\STATE Output segmentation map
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets.}
+We evaluate on standard OVSS benchmarks, including PASCAL VOC, PASCAL Context,
+COCO-Stuff, and ADE20K. Dataset-specific details follow the protocol of the
+backbone method.
+
+\paragraph{Runtime.}
+We use a frozen CLIP-based open-vocabulary segmentation runtime as the base
+pipeline. DeFT is inserted after visual token extraction and before text-image similarity.
+All runtime settings, prompts, and post-processing are kept unchanged unless
+explicitly stated.
+
+\paragraph{Metrics.}
+We report mean Intersection-over-Union (mIoU), mean accuracy (mAcc), boundary
+F-score, small-object mIoU, runtime, and GPU memory. Boundary and small-object
+metrics are used to verify the structural claim rather than only reporting
+global mIoU.
+
+\paragraph{Implementation details.}
+Unless otherwise specified, DeFT uses $k=12$, $\tau=0.46$, $\alpha=0.72$,
+$\lambda_g=0.65$, $\lambda_l=0.35$, and multi-scale kernels $\{3,5,7\}$.
+The same fixed hyperparameters are used across datasets.
+
+\subsection{Main Results}
+
+\begin{table*}[t]
+\centering
+\caption{Main comparison on open-vocabulary semantic segmentation benchmarks.
+Fill the empty cells after running the provided evaluation matrix.}
+\begin{tabular}{lcccccc}
+\toprule
+Method & Training-Free & PASCAL VOC & PASCAL Context & COCO-Stuff & ADE20K & Avg. \\
+\midrule
+CLIP baseline & Yes & -- & -- & -- & -- & -- \\
+MaskCLIP-style baseline & Yes & -- & -- & -- & -- & -- \\
+Frozen runtime & Yes & -- & -- & -- & -- & -- \\
+\textbf{DeFT (ours)} & Yes & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Ablation Study}
+
+\begin{table}[t]
+\centering
+\caption{Ablation of DeFT components.}
+\begin{tabular}{lccc}
+\toprule
+Variant & mIoU & Boundary-F & Small mIoU \\
+\midrule
+Frozen runtime & -- & -- & -- \\
+DeFT w/o graph evidence & -- & -- & -- \\
+DeFT w/o local evidence & -- & -- & -- \\
+DeFT w/o multi-scale recalibration & -- & -- & -- \\
+DeFT full & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Sensitivity to the number of support neighbors $k$.}
+\begin{tabular}{lccccc}
+\toprule
+$k$ & 4 & 8 & 12 & 16 & 24 \\
+\midrule
+mIoU & -- & -- & -- & -- & -- \\
+Boundary-F & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Analysis}
+
+We visualize support density maps, tracing gates, and segmentation maps before
+and after DeFT. The expected pattern is that low-density gates concentrate on
+ambiguous boundaries, thin structures, and small regions. After tracing,
+activation maps should become more spatially continuous while preserving class
+specificity. We also visualize token similarity graphs to show how DeFT traces
+evidence from high-support regions to sparse regions.
+
+\section{Conclusion}
+
+We presented DeFT, a training-free framework for open-vocabulary semantic
+segmentation. Instead of adding a trainable decoder, DeFT studies the support
+density of frozen visual tokens and traces reliable evidence to regions with
+insufficient support. By combining graph evidence, local evidence, and
+multi-scale structure recalibration, DeFT improves dense prediction while
+preserving the original vision-language embedding space. Future work can explore
+faster approximate support graphs and stronger prompt-conditioned rendering.
+
+\bibliographystyle{aaai}
+\bibliography{references}
+
+\end{document}

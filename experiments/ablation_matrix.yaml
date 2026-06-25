@@ -1,0 +1,38 @@
+main:
+  method: DeFT
+  setting: training-free
+  fixed_hyperparameters:
+    knn: 12
+    density_threshold: 0.46
+    trace_strength: 0.72
+    graph_weight: 0.65
+    local_weight: 0.35
+    multiscale_kernels: [3, 5, 7]
+    multiscale_strength: 0.18
+
+comparisons:
+  - baseline_sfp
+  - sfp_plus_simam_parameter_free
+  - sfp_plus_lsk_untrained
+  - deft_full
+
+ablations:
+  - name: w/o density-guided tracing
+    change: trace_strength=0
+  - name: w/o graph evidence
+    change: graph_weight=0, local_weight=1
+  - name: w/o local evidence
+    change: graph_weight=1, local_weight=0
+  - name: w/o multi-scale recalibration
+    change: multiscale_strength=0
+  - name: k sensitivity
+    change: knn in [4, 8, 12, 16, 24]
+  - name: density threshold sensitivity
+    change: density_threshold in [0.38, 0.42, 0.46, 0.50, 0.54]
+
+visualizations:
+  - support density map
+  - tracing gate map
+  - token similarity graph before and after DeFT
+  - class activation map before and after DeFT
+  - boundary zoom-in examples
